@@ -42,6 +42,8 @@ def scaled_dot_product_attention_transposed(
     key: Key tensor, with shape [B, T, KV_LEN, H].
     value: Value tensor, with shape [B, T, H, KV_LEN].
     head_size (int): head dimension.
+    k_ts_idx (int): the index of time step dimension in the key tensor.
+    v_ts_idx (int): the index of time step dimension in the value tensor.
     mask (torch.Tensor): the optional mask tensor.
     scale (float): the optional scale factor.
     softcap (float): the optional softcap for the logits.

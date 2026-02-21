@@ -22,6 +22,7 @@ import time
 
 import huggingface_hub
 from litert_torch import fx_infra
+from litert_torch import progress
 from litert_torch._convert import interface as converter_utils
 from litert_torch.backend.experimental import torch_tfl
 from litert_torch.generative.export_hf.core import attention as _
@@ -60,11 +61,14 @@ class SourceModelArtifacts:
 class ExportedModelArtifacts:
   """Exported model artifacts."""
 
-  prefill_decode_model_path: str
+  prefill_decode_model_path: str | None = None
   embedder_model_path: str | None = None
   vision_encoder_model_path: str | None = None
   vision_adapter_model_path: str | None = None
   auxiliary_model_path: str | None = None
+  tokenizer_model_path: str | None = None
+
+  litert_lm_model_path: str | None = None
 
 
 def verify_model_compatibility(model, model_config, text_model_config):
@@ -103,6 +107,7 @@ def verify_model_compatibility(model, model_config, text_model_config):
     print('Model does not support attention backend.')
 
 
+@progress.task('Load source model')
 def load_model(
     model_path: str,
     trust_remote_code: bool = False,
@@ -204,15 +209,17 @@ def get_prefill_decode_exportable_cls(
     )
 
 
+@progress.task('Export text prefill-decode model')
 def export_text_prefill_decode_model(
-    model,
-    text_model_config,
+    source_model_artifacts: SourceModelArtifacts,
     export_config: exportable_module.ExportableModuleConfig,
-    work_dir: str,
-    quantization_recipe: str | None = None,
-    **kwargs,
+    exported_model_artifacts: ExportedModelArtifacts,
 ):
   """Exports text model to tflite."""
+  model = source_model_artifacts.model
+  text_model_config = source_model_artifacts.text_model_config
+  quantization_recipe = export_config.quantization_recipe
+  work_dir = export_config.work_dir
   has_dynamic_shape = (
       export_config.cache_length_dim is not None
       or export_config.prefill_length_dim is not None
@@ -248,12 +255,10 @@ def export_text_prefill_decode_model(
           dynamic_shapes=prefill_dynamic_shapes,
       )
 
-      print('Running prefill_module pre lower decompositions...')
       prefill_ep = fx_infra.safe_run_decompositions(
           prefill_ep, fx_infra.decomp.pre_lower_decomp()
       )
 
-      print('Running prefill_module decompositions...')
       prefill_ep = prefill_ep.run_decompositions(torch_tfl.decomps)
 
       converter.add_signature(
@@ -272,7 +277,6 @@ def export_text_prefill_decode_model(
       text_model_config
   )['decode']
   if has_dynamic_shape:
-    print('Exporting decode_module...')
     decode_ep = torch.export.export(
         decode_module,
         args=(),
@@ -280,12 +284,10 @@ def export_text_prefill_decode_model(
         dynamic_shapes=decode_dynamic_shapes,
     )
 
-    print('Running decode_module pre lower decompositions...')
     decode_ep = fx_infra.safe_run_decompositions(
         decode_ep, fx_infra.decomp.pre_lower_decomp()
     )
 
-    print('Running decode_module decompositions...')
     decode_ep = decode_ep.run_decompositions(torch_tfl.decomps)
 
     converter.add_signature(
@@ -301,23 +303,15 @@ def export_text_prefill_decode_model(
         sample_kwargs=sample_decode_inputs,
     )
 
-  start_time = time.perf_counter()
-
-  print('Converting model...')
   lrt_model = converter.convert(strict_export=False)
-  print('Converting model done.')
 
   lrt_model = mu_pass_lib.update_model(lrt_model)
-  if kwargs.get('experimental_use_mixed_precision', False):
+  if export_config.experimental_use_mixed_precision:
     print('Applying mixed precision to model...')
     lrt_model = mu_pass_lib.apply_mixed_precision(lrt_model)
 
   model_path = os.path.join(work_dir, 'model.tflite')
-  print(f'Exporting model to {model_path}...')
   lrt_model.export(model_path)
-  end_time = time.perf_counter()
-  elapsed_time = end_time - start_time
-  print(f'Model conversion executed in {elapsed_time} seconds.')
 
   del lrt_model
   del converter
@@ -331,7 +325,10 @@ def export_text_prefill_decode_model(
     model_path = maybe_quantize_model(model_path, recipe)
     gc.collect()
 
-  return model_path
+  return dataclasses.replace(
+      exported_model_artifacts,
+      prefill_decode_model_path=model_path,
+  )
 
 
 def maybe_quantize_model(
@@ -341,7 +338,15 @@ def maybe_quantize_model(
   """Quantizes model if recipe is provided."""
   if not quantization_recipe:
     return model_path
-  start_time = time.perf_counter()
+  return quantize_model(model_path, quantization_recipe)
+
+
+@progress.task('Quantize model')
+def quantize_model(
+    model_path: str,
+    quantization_recipe: str,
+):
+  """Quantizes model."""
   quantized_model_path = (
       model_path.removesuffix('.tflite').removesuffix('_quantized')
       + '_quantized.tflite'
@@ -359,20 +364,20 @@ def maybe_quantize_model(
         ' the recipe name.'
     ) from e
   qt.quantize().export_model(quantized_model_path, overwrite=True)
-  end_time = time.perf_counter()
-  elapsed_time = end_time - start_time
-  print(f'Model quantization executed in {elapsed_time} seconds.')
   return quantized_model_path
 
 
+@progress.task('Export embedder model')
 def export_embedder_model(
-    model,
-    text_model_config,
+    source_model_artifacts: SourceModelArtifacts,
     export_config: exportable_module.ExportableModuleConfig,
-    work_dir: str,
-    quantization_recipe: str | None = None,
+    exported_model_artifacts: ExportedModelArtifacts,
 ):
   """Exports embedder."""
+  model = source_model_artifacts.model
+  text_model_config = source_model_artifacts.text_model_config
+  quantization_recipe = export_config.quantization_recipe
+  work_dir = export_config.work_dir
   embedder_module = external_emb_module.LiteRTExportableModuleForEmbedder(
       model.get_input_embeddings()
   )
@@ -395,19 +400,29 @@ def export_embedder_model(
   for recipe in quantization_recipe_list:
     model_path = maybe_quantize_model(model_path, recipe)
     gc.collect()
-  return model_path
+  return dataclasses.replace(
+      exported_model_artifacts,
+      embedder_model_path=model_path,
+  )
 
 
+@progress.task('Export vision encoder models')
 def export_vision_encoder_models(
-    model,
-    image_processor,
-    model_config,
-    tokenizer,
+    source_model_artifacts: SourceModelArtifacts,
     export_config: exportable_module.ExportableModuleConfig,
-    work_dir: str,
-    quantization_recipe: str | None = None,
+    exported_model_artifacts: ExportedModelArtifacts,
 ):
   """Exports vision encoder models."""
+  model = source_model_artifacts.model
+  image_processor = source_model_artifacts.image_processor
+  model_config = source_model_artifacts.model_config
+  tokenizer = source_model_artifacts.tokenizer
+  quantization_recipe = (
+      export_config.vision_encoder_quantization_recipe
+      or export_config.quantization_recipe
+  )
+  work_dir = export_config.work_dir
+
   model.set_attn_implementation('eager')
   encoder_module_cls, adapter_module_cls = (
       model_ext_exportables.get_vision_exportables(model_config)
@@ -453,18 +468,23 @@ def export_vision_encoder_models(
   for recipe in quantization_recipe_list:
     adapter_path = maybe_quantize_model(adapter_path, recipe)
     gc.collect()
-  return vision_encoder_path, adapter_path
+  return dataclasses.replace(
+      exported_model_artifacts,
+      vision_encoder_model_path=vision_encoder_path,
+      vision_adapter_model_path=adapter_path,
+  )
 
 
+@progress.task('Export auxiliary model')
 def export_auxiliary_model(
-    model,
-    text_model_config,
+    source_model_artifacts: SourceModelArtifacts,
     export_config: exportable_module.ExportableModuleConfig,
-    work_dir: str,
-    quantization_recipe: str | None = None,
+    exported_model_artifacts: ExportedModelArtifacts,
 ):
   """Exports auxiliary model."""
-  del quantization_recipe  # Unused.
+  model = source_model_artifacts.model
+  text_model_config = source_model_artifacts.text_model_config
+  work_dir = export_config.work_dir
   converter = converter_utils.Converter()
   # RoPE
   rope_module = external_rope_module.RoPEEmbedder(model)
@@ -505,14 +525,21 @@ def export_auxiliary_model(
   lrt_model = converter.convert(strict_export=False)
   model_path = os.path.join(work_dir, 'auxiliary.tflite')
   lrt_model.export(model_path)
-  return model_path
+  return dataclasses.replace(
+      exported_model_artifacts,
+      auxiliary_model_path=model_path,
+  )
 
 
+@progress.task('Export tokenizer')
 def export_tokenizer(
-    tokenizer,
-    work_dir: str,
-) -> str:
+    source_model_artifacts: SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: ExportedModelArtifacts,
+) -> ExportedModelArtifacts:
   """Exports tokenizer."""
+  tokenizer = source_model_artifacts.tokenizer
+  work_dir = export_config.work_dir
   try:
     tokenizer_path = tokenizer.save_pretrained(work_dir, legacy_format=False)
     # TODO(weiyiw): This is rough... polish it.
@@ -521,9 +548,11 @@ def export_tokenizer(
           x for x in tokenizer_path if x.endswith('tokenizer.json')
       ]
       assert len(tokenizer_path) == 1
-      return tokenizer_path[0]
-    else:
-      return tokenizer_path
+      tokenizer_path = tokenizer_path[0]
+    return dataclasses.replace(
+        exported_model_artifacts,
+        tokenizer_model_path=tokenizer_path,
+    )
   except Exception:  # pylint: disable=broad-exception-caught
     # Fallback to convert tokenizer to sentencepiece.
     print('Failed to export tokenizer. Converting to sentencepiece.')
@@ -531,4 +560,7 @@ def export_tokenizer(
     tokenizer_path = os.path.join(work_dir, 'tokenizer.spiece')
     with open(tokenizer_path, 'wb') as f:
       f.write(spm_serialized)
-  return tokenizer_path
+  return dataclasses.replace(
+      exported_model_artifacts,
+      tokenizer_model_path=tokenizer_path,
+  )

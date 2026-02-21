@@ -105,6 +105,7 @@ class LiteRTExportableModuleForEmbedder(torch.nn.Module):
       **kwargs,
   ):
     """Gets sample inputs."""
+    del kwargs  # Unused.
     batch_size = export_config.batch_size
     prefill_length = export_config.prefill_lengths[0]
     prefill_length_dim = export_config.prefill_length_dim

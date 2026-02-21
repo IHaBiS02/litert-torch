@@ -19,10 +19,38 @@ import os
 import shutil
 import tempfile
 
+from litert_torch import progress
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import litert_lm_builder
 import torch
+
+
+@progress.task('LiteRT GenAI Export')
+def run_export_tasks(
+    model_path: str,
+    trust_remote_code: bool,
+    auto_model_override: str | None,
+    task: str,
+    export_tasks,
+    export_config,
+) -> export_lib.ExportedModelArtifacts:
+  """Runs export tasks."""
+  source_model_artifacts = export_lib.load_model(
+      model_path,
+      trust_remote_code=trust_remote_code,
+      auto_model_override=auto_model_override,
+      task=task,
+  )
+  exported_model_artifacts = export_lib.ExportedModelArtifacts()
+  for export_task in export_tasks:
+    exported_model_artifacts = export_task(
+        source_model_artifacts,
+        export_config,
+        exported_model_artifacts,
+    )
+    gc.collect()
+  return exported_model_artifacts
 
 
 def export(
@@ -34,8 +62,8 @@ def export(
     enable_dynamic_shape: bool = False,
     externalize_embedder: bool = False,
     single_token_embedder: bool = False,
-    key_ts_idx: int = 2,
-    value_ts_idx: int = 3,
+    k_ts_idx: int = 2,
+    v_ts_idx: int = 3,
     split_cache: bool = False,
     auto_model_override: str | None = None,
     keep_temporary_files: bool = False,
@@ -62,8 +90,8 @@ def export(
     enable_dynamic_shape: Whether to enable dynamic shape.
     externalize_embedder: Whether to externalize the embedder.
     single_token_embedder: Whether to use a single token embedder.
-    key_ts_idx: The index of time step dimension in the key tensor.
-    value_ts_idx: The index of time step dimension in the value tensor.
+    k_ts_idx: The index of time step dimension in the key tensor.
+    v_ts_idx: The index of time step dimension in the value tensor.
     split_cache: Whether to use split cache attention.
     auto_model_override: Overriding the AutoModel class to use for export.
     keep_temporary_files: Whether to keep the temporary files.
@@ -83,19 +111,6 @@ def export(
     work_dir = tempfile.mkdtemp(dir=output_dir)
   else:
     work_dir = output_dir
-  source_model_artifacts = export_lib.load_model(
-      model,
-      trust_remote_code=trust_remote_code,
-      auto_model_override=auto_model_override,
-      task=task,
-  )
-  pt_model, config, text_model_config, tokenizer, image_processor = (
-      source_model_artifacts.model,
-      source_model_artifacts.model_config,
-      source_model_artifacts.text_model_config,
-      source_model_artifacts.tokenizer,
-      source_model_artifacts.image_processor,
-  )
 
   if export_vision_encoder:
     assert (
@@ -107,6 +122,11 @@ def export(
     ), 'Split_cache requires externalize_embedder to be enabled.'
 
   export_config = exportable_module.ExportableModuleConfig(
+      task=task,
+      work_dir=work_dir,
+      output_dir=output_dir,
+      use_jinja_template=use_jinja_template,
+      litert_lm_model_type_override=litert_lm_model_type_override,
       batch_size=1,
       prefill_lengths=prefill_lengths,
       cache_length=cache_length,
@@ -116,79 +136,46 @@ def export(
       cache_length_dim=torch.export.Dim('cache_length')
       if enable_dynamic_shape
       else None,
+      quantization_recipe=quantization_recipe,
+      vision_encoder_quantization_recipe=vision_encoder_quantization_recipe,
       externalize_embedder=externalize_embedder,
+      export_vision_encoder=export_vision_encoder,
       single_token_embedder=single_token_embedder,
-      k_ts_idx=key_ts_idx,
-      v_ts_idx=value_ts_idx,
+      k_ts_idx=k_ts_idx,
+      v_ts_idx=v_ts_idx,
       split_cache=split_cache,
       externalize_rope=split_cache,
       cache_implementation='LiteRTLMSplitCache'
       if split_cache
       else 'LiteRTLMCache',
-  )
-  prefill_decode_model_path = export_lib.export_text_prefill_decode_model(
-      pt_model,
-      text_model_config,
-      export_config,
-      work_dir,
-      quantization_recipe,
       experimental_use_mixed_precision=experimental_use_mixed_precision,
   )
-  exported_model_artifacts = export_lib.ExportedModelArtifacts(
-      prefill_decode_model_path=prefill_decode_model_path,
-  )
+
+  export_tasks = []
+  export_tasks.append(export_lib.export_text_prefill_decode_model)
   if export_vision_encoder:
-    # TODO(weiyiw): Add support for packaging vision encoder models.
-    vision_models = export_lib.export_vision_encoder_models(
-        pt_model,
-        image_processor,
-        config,
-        tokenizer,
-        export_config,
-        work_dir,
-        vision_encoder_quantization_recipe or quantization_recipe,
-    )
-    exported_model_artifacts.vision_encoder_model_path = (
-        vision_models[0]
-    )
-    exported_model_artifacts.vision_adapter_model_path = (
-        vision_models[1]
-    )
-  gc.collect()
+    export_tasks.append(export_lib.export_vision_encoder_models)
   if externalize_embedder:
-    embedder_model_path = export_lib.export_embedder_model(
-        pt_model,
-        text_model_config,
-        export_config,
-        work_dir,
-        quantization_recipe,
-    )
-    exported_model_artifacts.embedder_model_path = embedder_model_path
-  gc.collect()
+    export_tasks.append(export_lib.export_embedder_model)
   if split_cache:
-    auxiliary_model_path = export_lib.export_auxiliary_model(
-        pt_model,
-        text_model_config,
-        export_config,
-        work_dir,
-        quantization_recipe,
-    )
-    exported_model_artifacts.auxiliary_model_path = auxiliary_model_path
-  gc.collect()
-  tokenizer_model_path = export_lib.export_tokenizer(tokenizer, work_dir)
+    export_tasks.append(export_lib.export_auxiliary_model)
+  export_tasks.append(export_lib.export_tokenizer)
   if bundle_litert_lm:
-    litert_lm_builder.package_model(
-        pt_model,
-        tokenizer,
-        image_processor,
-        exported_model_artifacts,
-        tokenizer_model_path,
-        cache_length,
-        work_dir,
-        output_dir,
-        use_jinja_template,
-        litert_lm_model_type_override,
-    )
+    export_tasks.append(litert_lm_builder.package_model)
+
+  exported_model_artifacts = run_export_tasks(
+      model,
+      trust_remote_code,
+      auto_model_override,
+      task,
+      export_tasks,
+      export_config,
+  )
+
   if not keep_temporary_files and not split_cache:
-    print(f'Removing temporary files from: {work_dir}')
+    print('Cleaning up temporary files.')
     shutil.rmtree(work_dir)
+  print(
+      'Export complete. Model saved to:'
+      f' {exported_model_artifacts.litert_lm_model_path}'
+  )

@@ -14,9 +14,13 @@
 # ==============================================================================
 """Litert LM builder for packing exported models."""
 
+import dataclasses
 import os
 
+from litert_torch import progress
 from litert_torch.generative.export_hf.core import export_lib
+from litert_torch.generative.export_hf.core import exportable_module
+from litert_torch.generative.export_hf.model_ext import metadata_builder as metadata_builder_lib
 
 from ai_edge_litert.internal import litertlm_builder
 from ai_edge_litert.internal import llm_metadata_pb2
@@ -96,15 +100,16 @@ def parse_chat_template(tokenizer):
 
 
 def build_llm_metadata(
-    model,
-    tokenizer,
-    image_processor,
+    source_model_artifacts: export_lib.SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
     chat_templates: tuple[tuple, tuple, tuple] | str,  # pylint: disable=g-bare-generic,
-    context_length: int,
     exported_model_artifacts: export_lib.ExportedModelArtifacts,
     litert_lm_model_type_override: str | None = None,
 ):
   """Builds LLM metadata."""
+  model = source_model_artifacts.model
+  tokenizer = source_model_artifacts.tokenizer
+  context_length = export_config.cache_length
 
   llm_metadata = llm_metadata_pb2.LlmMetadata()
 
@@ -171,17 +176,13 @@ def build_llm_metadata(
       llm_metadata.llm_model_type.CopyFrom(
           llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
       )
-    case ('qwen2' | 'qwen2p5'):
+    case 'qwen2' | 'qwen2p5':
       llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(
-              qwen2p5=llm_model_type_pb2.Qwen2p5()
-          )
+          llm_model_type_pb2.LlmModelType(qwen2p5=llm_model_type_pb2.Qwen2p5())
       )
     case 'gemma3':
       llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(
-              gemma3=llm_model_type_pb2.Gemma3()
-          )
+          llm_model_type_pb2.LlmModelType(gemma3=llm_model_type_pb2.Gemma3())
       )
     case 'function_gemma':
       llm_metadata.llm_model_type.CopyFrom(
@@ -191,9 +192,7 @@ def build_llm_metadata(
       )
     case 'gemma3n':
       llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(
-              gemma3n=llm_model_type_pb2.Gemma3N()
-          )
+          llm_model_type_pb2.LlmModelType(gemma3n=llm_model_type_pb2.Gemma3N())
       )
     case _:
       llm_metadata.llm_model_type.CopyFrom(
@@ -201,46 +200,31 @@ def build_llm_metadata(
               generic_model=llm_model_type_pb2.GenericModel()
           )
       )
-
-  # Hack for multimodal. Currently LiteRT-LM only have Gemma3N as multimodal.
-  if exported_model_artifacts.vision_encoder_model_path:
-    # The followings are Gemma3 specific.
-    # TODO(weiyiw): Refactor to support other multimodal models.
-    if not hasattr(tokenizer, 'special_tokens_map'):
-      raise ValueError('Tokenizer does not have special_tokens_map.')
-    token_map = tokenizer.special_tokens_map
-    boi_token = token_map.get('boi_token', '')
-    eoi_token = token_map.get('eoi_token', '')
-    llm_metadata.llm_model_type.CopyFrom(
-        llm_model_type_pb2.LlmModelType(gemma3n=llm_model_type_pb2.Gemma3N())
-    )
-    llm_metadata.llm_model_type.gemma3n.start_of_image_token.token_str = (
-        boi_token
-    )
-    llm_metadata.llm_model_type.gemma3n.end_of_image_token.token_str = eoi_token
-    llm_metadata.llm_model_type.gemma3n.image_tensor_height = (
-        image_processor.size['height']
-    )
-    llm_metadata.llm_model_type.gemma3n.image_tensor_width = (
-        image_processor.size['width']
-    )
+  # Model specific metadata builders.
+  metadata_builder = metadata_builder_lib.get_metadata_builder(model.config)
+  llm_metadata = metadata_builder(
+      source_model_artifacts,
+      export_config,
+      exported_model_artifacts,
+      llm_metadata,
+  )
 
   return llm_metadata
 
 
-def pack_to_litert_lm(
-    model,
-    tokenizer,
-    image_processor,
+@progress.task('Package model')
+def package_model(
+    source_model_artifacts: export_lib.SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
     exported_model_artifacts: export_lib.ExportedModelArtifacts,
-    tokenizer_model_path: str,
-    cache_length: int,
-    work_dir: str,
-    output_dir: str,
-    use_jinja_template: bool = False,
-    litert_lm_model_type_override: str | None = None,
 ):
   """Packs models to LiteRT LM."""
+  work_dir = export_config.work_dir
+  output_dir = export_config.output_dir
+  use_jinja_template = export_config.use_jinja_template
+  litert_lm_model_type_override = export_config.litert_lm_model_type_override
+  tokenizer = source_model_artifacts.tokenizer
+  tokenizer_model_path = exported_model_artifacts.tokenizer_model_path
   if use_jinja_template:
     chat_templates = getattr(tokenizer, 'chat_template', '')
   else:
@@ -248,11 +232,9 @@ def pack_to_litert_lm(
   if not chat_templates:
     print('WARNING: Chat template is not found. Using empty template.')
   llm_metadata = build_llm_metadata(
-      model,
-      tokenizer,
-      image_processor,
+      source_model_artifacts,
+      export_config,
       chat_templates,
-      cache_length,
       exported_model_artifacts,
       litert_lm_model_type_override,
   )
@@ -269,6 +251,9 @@ def pack_to_litert_lm(
       )
   )
   builder.add_llm_metadata(llm_metadata_path)
+  assert (
+      tokenizer_model_path is not None
+  ), 'Exported tokenizer model path is not found.'
   if tokenizer_model_path.endswith('.json'):
     builder.add_hf_tokenizer(tokenizer_model_path)
   else:
@@ -297,32 +282,10 @@ def pack_to_litert_lm(
         exported_model_artifacts.auxiliary_model_path,
         litertlm_builder.TfLiteModelType.AUX,
     )
-  with open(os.path.join(output_dir, 'model.litertlm'), 'wb') as f:
+  model_path = os.path.join(output_dir, 'model.litertlm')
+  with open(model_path, 'wb') as f:
     builder.build(f)
-
-
-def package_model(
-    model,
-    tokenizer,
-    image_processor,
-    exported_model_artifacts: export_lib.ExportedModelArtifacts,
-    tokenizer_model_path: str,
-    cache_length: int,
-    work_dir: str,
-    output_dir: str,
-    use_jinja_template: bool,
-    litert_lm_model_type_override: str | None = None,
-):
-  """Packs models."""
-  pack_to_litert_lm(
-      model,
-      tokenizer,
-      image_processor,
+  return dataclasses.replace(
       exported_model_artifacts,
-      tokenizer_model_path,
-      cache_length,
-      work_dir,
-      output_dir,
-      use_jinja_template,
-      litert_lm_model_type_override,
+      litert_lm_model_path=model_path,
   )

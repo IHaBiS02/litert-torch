@@ -21,6 +21,13 @@ import torch
 @dataclasses.dataclass
 class ExportableModuleConfig:
   """Config for exportable modules."""
+  task: str = "text_generation"
+
+  work_dir: str | None = None
+  output_dir: str | None = None
+
+  use_jinja_template: bool = False
+  litert_lm_model_type_override: str | None = None
 
   batch_size: int = 1
   cache_length: int = 1280
@@ -29,12 +36,21 @@ class ExportableModuleConfig:
   cache_length_dim: torch.export.Dim | None = None
   prefill_length_dim: torch.export.Dim | None = None
 
+  # For quantization
+  quantization_recipe: str | None = None
+  vision_encoder_quantization_recipe: str | None = None
+
   # Export configs
   externalize_embedder: bool = False
   single_token_embedder: bool = False
   externalize_rope: bool = False
 
+  export_vision_encoder: bool = False
+
   split_cache: bool = False
   cache_implementation: str = "LiteRTLMCache"
   k_ts_idx: int = 2
   v_ts_idx: int = 3
+
+  # Experimental configs
+  experimental_use_mixed_precision: bool = False
