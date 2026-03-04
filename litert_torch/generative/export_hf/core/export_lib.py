@@ -323,7 +323,7 @@ def export_text_prefill_decode_model(
     )
 
   lrt_model = converter.convert(
-      lightweight_conversion=True,
+      lightweight_conversion=export_config.experimental_lightweight_conversion,
       strict_export=False,
   )
 
@@ -414,7 +414,7 @@ def export_embedder_model(
         sample_kwargs=sample_inputs,
     )
   lrt_model = converter.convert(
-      lightweight_conversion=True,
+      lightweight_conversion=export_config.experimental_lightweight_conversion,
       strict_export=False,
   )
   model_path = os.path.join(work_dir, 'embedder.tflite')

@@ -54,6 +54,8 @@ class ExportableModuleConfig:
   litert_lm_model_type_override: str | None = None
   litert_lm_llm_metadata_override: str | None = None
 
+  experimental_lightweight_conversion: bool = False
+
   extra_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   # Internal configs
