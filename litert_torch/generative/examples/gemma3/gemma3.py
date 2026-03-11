@@ -244,26 +244,31 @@ def build_model_4b_mm(
   config = get_model_config_4b()
   model = Gemma3MM(config, mask_cache_size)
 
+  # Load checkpoint once and reuse for all components.
+  # Each ModelLoader.load() pops its own keys from state via state.pop(),
+  # so sharing the same dict is safe — each component takes only its keys.
+  base_loader = loading_utils.ModelLoader(checkpoint_path, None, custom_loader)
+  state = base_loader.get_state()
+  cached_loader = lambda _: state
+
   # Load image encoder parameters.
-  loader = loading_utils.ModelLoader(
-      checkpoint_path, image_encoder.TENSOR_NAMES_HF, custom_loader
+  enc_loader = loading_utils.ModelLoader(
+      checkpoint_path, image_encoder.TENSOR_NAMES_HF, cached_loader
   )
-  loader.load(model.image_encoder.siglip_encoder, strict=False)
+  enc_loader.load(model.image_encoder.siglip_encoder, strict=False)
 
   # Load decoder parameters.
-  loader = loading_utils.ModelLoader(
-      checkpoint_path, decoder.TENSOR_NAMES_HF_4B, custom_loader
+  dec_loader = loading_utils.ModelLoader(
+      checkpoint_path, decoder.TENSOR_NAMES_HF_4B, cached_loader
   )
-  loader.load(model.decoder, strict=False)
+  dec_loader.load(model.decoder, strict=False)
 
-  # Load projection and mm_norm manually.
-  loader = loading_utils.ModelLoader(checkpoint_path, None, custom_loader)
-  state = loader.get_state()
-  converted_state = dict()
-  # Transpose: checkpoint shape is [1152, 2560], nn.Linear expects [2560, 1152]
-  converted_state["weight"] = state.pop(PROJECTION_TENSOR_NAME_4B).T
-  model.image_projection.load_state_dict(converted_state)
+  # Load projection weight (transpose required).
+  proj_state = dict()
+  proj_state["weight"] = state.pop(PROJECTION_TENSOR_NAME_4B).T
+  model.image_projection.load_state_dict(proj_state)
 
+  # Load mm_norm weight.
   mm_norm_state = dict()
   mm_norm_state["weight"] = state.pop(MM_NORM_TENSOR_NAME_4B)
   model.mm_norm.load_state_dict(mm_norm_state)
