@@ -30,6 +30,10 @@ from torch import nn
 
 
 PROJECTION_TENSOR_NAME = "multi_modal_projector.linear"
+PROJECTION_TENSOR_NAME_4B = (
+    "multi_modal_projector.mm_input_projection_weight"
+)
+MM_NORM_TENSOR_NAME_4B = "multi_modal_projector.mm_soft_emb_norm.weight"
 
 
 @dataclass
@@ -195,5 +199,74 @@ def build_model_270m(
     config = decoder.get_decoder_config_270m()
     model = decoder.Decoder(config, mask_cache_size)
   # TODO: Load the parameters of decoder from checkpoint.
+  model.eval()
+  return model
+
+
+def get_model_config_4b() -> Gemma3MMConfig:
+  """Returns the model config for a Gemma3 4B multimodal model."""
+  return Gemma3MMConfig(
+      image_encoder_config=image_encoder.get_image_encoder_config(),
+      decoder_config=decoder.get_decoder_config_4b(),
+      image_token_id=262144,
+      image_projection_scale=1152**0.5,
+      image_projection_use_bias=False,
+      mm_norm_config=cfg.NormalizationConfig(
+          type=cfg.NormalizationType.RMS_NORM, epsilon=1e-6
+      ),
+      mm_extra_tokens=32,
+  )
+
+
+def build_model_4b(
+    checkpoint_path: str,
+    custom_loader: Callable[[str], Dict[str, torch.Tensor]] = None,
+    mask_cache_size: int = 0,
+) -> decoder.Decoder:
+  """Builds a Gemma3 4B decoder-only model."""
+  if checkpoint_path:
+    model = decoder.build_model_4b(
+        checkpoint_path, custom_loader, mask_cache_size
+    )
+  else:
+    config = decoder.get_decoder_config_4b()
+    model = decoder.Decoder(config, mask_cache_size)
+  model.eval()
+  return model
+
+
+def build_model_4b_mm(
+    checkpoint_path: str,
+    custom_loader: Callable[[str], Dict[str, torch.Tensor]] = None,
+    mask_cache_size: int = 0,
+) -> Gemma3MM:
+  """Builds a Gemma3 4B multimodal model from HuggingFace checkpoint."""
+  config = get_model_config_4b()
+  model = Gemma3MM(config, mask_cache_size)
+
+  # Load image encoder parameters.
+  loader = loading_utils.ModelLoader(
+      checkpoint_path, image_encoder.TENSOR_NAMES_HF, custom_loader
+  )
+  loader.load(model.image_encoder.siglip_encoder, strict=False)
+
+  # Load decoder parameters.
+  loader = loading_utils.ModelLoader(
+      checkpoint_path, decoder.TENSOR_NAMES_HF_4B, custom_loader
+  )
+  loader.load(model.decoder, strict=False)
+
+  # Load projection and mm_norm manually.
+  loader = loading_utils.ModelLoader(checkpoint_path, None, custom_loader)
+  state = loader.get_state()
+  converted_state = dict()
+  # Transpose: checkpoint shape is [1152, 2560], nn.Linear expects [2560, 1152]
+  converted_state["weight"] = state.pop(PROJECTION_TENSOR_NAME_4B).T
+  model.image_projection.load_state_dict(converted_state)
+
+  mm_norm_state = dict()
+  mm_norm_state["weight"] = state.pop(MM_NORM_TENSOR_NAME_4B)
+  model.mm_norm.load_state_dict(mm_norm_state)
+
   model.eval()
   return model
