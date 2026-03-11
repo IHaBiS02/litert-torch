@@ -585,15 +585,11 @@ def build_model_4b(
     mask_cache_size: int = 0,
 ) -> nn.Module:
   """Builds a Gemma3 4B decoder model."""
-  for tensor_names in TENSOR_NAMES_DICT.values():
-    try:
-      return model_builder.build_decoder_only_model(
-          checkpoint_path=checkpoint_path,
-          config=get_decoder_config_4b(),
-          tensor_names=tensor_names,
-          model_class=Decoder,
-          custom_loader=custom_loader,
-          mask_cache_size=mask_cache_size,
-      )
-    except KeyError:
-      continue
+  return model_builder.build_decoder_only_model(
+      checkpoint_path=checkpoint_path,
+      config=get_decoder_config_4b(),
+      tensor_names=TENSOR_NAMES_HF_4B,
+      model_class=Decoder,
+      custom_loader=custom_loader,
+      mask_cache_size=mask_cache_size,
+  )
