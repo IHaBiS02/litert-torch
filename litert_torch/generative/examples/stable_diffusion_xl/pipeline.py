@@ -89,12 +89,14 @@ class StableDiffusionXL:
       open_clip_ckpt: str,
       diffusion_ckpt: str,
       decoder_ckpt: str,
+      text_projection: Optional[np.ndarray] = None,
   ):
     self.tokenizer = tokenizer.Tokenizer(tokenizer_vocab_dir)
     self.clip = litert_torch.model.TfLiteModel.load(clip_ckpt)
     self.open_clip = litert_torch.model.TfLiteModel.load(open_clip_ckpt)
     self.diffusion = litert_torch.model.TfLiteModel.load(diffusion_ckpt)
     self.decoder = litert_torch.model.TfLiteModel.load(decoder_ckpt)
+    self.text_projection = text_projection
 
 
 def run_sdxl_tflite_pipeline(
@@ -149,13 +151,21 @@ def run_sdxl_tflite_pipeline(
   cond_clip = model.clip(cond_tokens, signature_name='encode')
   uncond_clip = model.clip(uncond_tokens, signature_name='encode')
 
-  # OpenCLIP-G encoding (penultimate hidden states + pooled)
-  cond_open_clip_hidden, cond_pooled = model.open_clip(
+  # OpenCLIP-G encoding (penultimate hidden states + final normed states)
+  cond_open_clip_hidden, cond_final = model.open_clip(
       cond_tokens, signature_name='encode'
   )
-  uncond_open_clip_hidden, uncond_pooled = model.open_clip(
+  uncond_open_clip_hidden, uncond_final = model.open_clip(
       uncond_tokens, signature_name='encode'
   )
+
+  # EOS pooling + text_projection (done outside TFLite model for compatibility)
+  cond_eos_idx = int(np.argmax(cond_tokens))
+  uncond_eos_idx = int(np.argmax(uncond_tokens))
+  cond_pooled = cond_final[0, cond_eos_idx] @ model.text_projection
+  uncond_pooled = uncond_final[0, uncond_eos_idx] @ model.text_projection
+  cond_pooled = cond_pooled[np.newaxis, :]
+  uncond_pooled = uncond_pooled[np.newaxis, :]
 
   # Concatenate CLIP-L (768) + OpenCLIP-G (1280) = 2048 context
   cond_context = np.concatenate([cond_clip, cond_open_clip_hidden], axis=-1)

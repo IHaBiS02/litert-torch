@@ -129,10 +129,15 @@ def convert_sdxl_to_tflite(
 
   # Get context shape from CLIP-L + OpenCLIP-G
   clip_out = clip_model(prompt_tokens)
-  open_clip_out, pooled_out = open_clip_model(prompt_tokens)
-  context_cond = torch.cat([clip_out, open_clip_out], dim=-1)
+  open_clip_penultimate, open_clip_final = open_clip_model(prompt_tokens)
+  context_cond = torch.cat([clip_out, open_clip_penultimate], dim=-1)
   context_uncond = torch.zeros_like(context_cond)
   context = torch.cat([context_cond, context_uncond], axis=0)
+
+  # EOS pooling + text_projection (done in PyTorch for tracing)
+  eos_idx = prompt_tokens.argmax(dim=-1)
+  pooled_out = open_clip_final[torch.arange(open_clip_final.shape[0]), eos_idx]
+  pooled_out = pooled_out @ open_clip_model.text_projection
 
   time_embedding = util.get_time_embedding(0)
 

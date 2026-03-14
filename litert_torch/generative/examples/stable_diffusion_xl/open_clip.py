@@ -69,7 +69,10 @@ class OpenCLIP(nn.Module):
   def forward(
       self, tokens: torch.IntTensor
   ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
-    """Forward pass returning penultimate hidden states and pooled output.
+    """Forward pass returning penultimate hidden states and final normed states.
+
+    EOS pooling and text_projection are applied outside the model (in the
+    pipeline) because argmax and fancy indexing are not TFLite-compatible.
 
     Args:
         tokens: Input token ids of shape (batch_size, seq_len).
@@ -77,7 +80,7 @@ class OpenCLIP(nn.Module):
     Returns:
         Tuple of:
           - penultimate_hidden_states: (batch_size, seq_len, 1280)
-          - pooled_output: (batch_size, 1280)
+          - final_hidden_states: (batch_size, seq_len, 1280) after final norm
     """
     state = self.tok_embedding(tokens) + self.tok_embedding_position
     penultimate = None
@@ -87,12 +90,7 @@ class OpenCLIP(nn.Module):
         penultimate = state
     state = self.final_norm(state)
 
-    # Pool from EOS token (highest token id position)
-    eos_indices = tokens.argmax(dim=-1)
-    pooled = state[torch.arange(state.shape[0]), eos_indices]
-    pooled = pooled @ self.text_projection
-
-    return penultimate, pooled
+    return penultimate, state
 
 
 def get_model_config() -> cfg.ModelConfig:
