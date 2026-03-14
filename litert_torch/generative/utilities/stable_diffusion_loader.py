@@ -76,6 +76,16 @@ class TransformerBlockTensorNames:
 
 
 @dataclass
+class MultiLayerTransformerBlockTensorNames:
+  pre_conv_norm: str
+  proj_in: str
+  self_attentions: List[AttentionBlockTensorNames]
+  cross_attentions: List[CrossAttentionBlockTensorNames]
+  feed_forwards: List[FeedForwardBlockTensorNames]
+  proj_out: str
+
+
+@dataclass
 class MidBlockTensorNames:
   residual_block_tensor_names: List[ResidualBlockTensorNames]
   attention_block_tensor_names: Optional[List[AttentionBlockTensorNames]] = None
@@ -400,6 +410,56 @@ class BaseLoader(loader.ModelLoader):
         tensor_names.conv_out,
         converted_state,
         f"{converted_state_param_prefix}.conv_out",
+    )
+
+  def _map_multi_layer_transformer_block(
+      self,
+      state: Dict[str, torch.Tensor],
+      converted_state: Dict[str, torch.Tensor],
+      tensor_names: MultiLayerTransformerBlockTensorNames,
+      converted_state_param_prefix: str,
+      config: unet_config.TransformerBlock2DConfig,
+      num_layers: int,
+  ):
+    _map_to_converted_state(
+        state,
+        tensor_names.pre_conv_norm,
+        converted_state,
+        f"{converted_state_param_prefix}.pre_conv_norm",
+    )
+    _map_to_converted_state(
+        state,
+        tensor_names.proj_in,
+        converted_state,
+        f"{converted_state_param_prefix}.proj_in",
+    )
+    for layer_idx in range(num_layers):
+      self._map_attention_block(
+          state,
+          converted_state,
+          tensor_names.self_attentions[layer_idx],
+          f"{converted_state_param_prefix}.self_attentions.{layer_idx}",
+          config.attention_block_config,
+      )
+      self._map_cross_attention_block(
+          state,
+          converted_state,
+          tensor_names.cross_attentions[layer_idx],
+          f"{converted_state_param_prefix}.cross_attentions.{layer_idx}",
+          config.cross_attention_block_config,
+      )
+      self._map_feedforward_block(
+          state,
+          converted_state,
+          tensor_names.feed_forwards[layer_idx],
+          f"{converted_state_param_prefix}.feed_forwards.{layer_idx}",
+          config.feed_forward_block_config,
+      )
+    _map_to_converted_state(
+        state,
+        tensor_names.proj_out,
+        converted_state,
+        f"{converted_state_param_prefix}.proj_out",
     )
 
   def _map_mid_block(

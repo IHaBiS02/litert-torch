@@ -360,6 +360,86 @@ class TransformerBlock2D(nn.Module):
     return x
 
 
+class MultiLayerTransformerBlock2D(nn.Module):
+  """Transformer block with N internal (self-attn + cross-attn + FF) layers.
+
+  Used by SDXL where transformer_layers_per_block = 2 or 10.
+  Uses Linear projections (proj_in/proj_out) instead of Conv2d(1x1).
+
+       input_tensor    context_tensor
+            |                 |
+  ┌─────────▼─────────┐       |
+  │   pre_conv_norm   |       │
+  └─────────┬─────────┘       |
+  ┌─────────▼─────────┐       |
+  │     proj_in       |       │
+  └─────────┬─────────┘       |
+            |                 |
+  ┌──────────────────────┐     |
+  │  N x (self_attn +   │◄────┘
+  │       cross_attn +  │
+  │       feed_forward)  │
+  └─────────┬────────────┘
+  ┌─────────▼─────────┐
+  │     proj_out      │
+  └─────────┬─────────┘
+            ▼
+      hidden_states
+  """
+
+  def __init__(
+      self,
+      config: unet_cfg.TransformerBlock2DConfig,
+      num_layers: int,
+      dim_override=None,
+  ):
+    super().__init__()
+    self.config = config
+    self.num_layers = num_layers
+    attention_block_config_dim = config.attention_block_config.dim
+    attention_block_config_hidden_dim = config.attention_block_config.hidden_dim
+    if dim_override:
+      attention_block_config_dim = dim_override
+    if not attention_block_config_hidden_dim:
+      attention_block_config_hidden_dim = attention_block_config_dim
+    self.pre_conv_norm = layers_builder.build_norm(
+        attention_block_config_dim, config.pre_conv_normalization_config
+    )
+    self.proj_in = nn.Linear(
+        attention_block_config_dim, attention_block_config_hidden_dim
+    )
+    self.self_attentions = nn.ModuleList(
+        [AttentionBlock2D(config.attention_block_config) for _ in range(num_layers)]
+    )
+    self.cross_attentions = nn.ModuleList(
+        [CrossAttentionBlock2D(config.cross_attention_block_config) for _ in range(num_layers)]
+    )
+    self.feed_forwards = nn.ModuleList(
+        [FeedForwardBlock2D(config.feed_forward_block_config) for _ in range(num_layers)]
+    )
+    self.proj_out = nn.Linear(
+        attention_block_config_hidden_dim, attention_block_config_dim
+    )
+
+  def forward(self, x: torch.Tensor, context: torch.Tensor):
+    residual_long = x
+    x = self.pre_conv_norm(x)
+    B, C, H, W = x.shape
+    x = x.view(B, C, H * W).transpose(1, 2)
+    x = self.proj_in(x)
+    x = x.transpose(1, 2).view(B, C, H, W)
+    for i in range(self.num_layers):
+      x = self.self_attentions[i](x)
+      x = self.cross_attentions[i](x, context)
+      x = self.feed_forwards[i](x)
+    B, C, H, W = x.shape
+    x = x.view(B, C, H * W).transpose(1, 2)
+    x = self.proj_out(x)
+    x = x.transpose(1, 2).view(B, C, H, W)
+    x = x + residual_long
+    return x
+
+
 class DownEncoderBlock2D(nn.Module):
   """Encoder block containing several residual blocks with optional interleaved transformer blocks.
 
@@ -415,7 +495,13 @@ class DownEncoderBlock2D(nn.Module):
           )
       )
       if config.transformer_block_config:
-        transformers.append(TransformerBlock2D(config.transformer_block_config))
+        num_tl = getattr(config, 'num_transformer_layers', 1)
+        if num_tl > 1:
+          transformers.append(
+              MultiLayerTransformerBlock2D(config.transformer_block_config, num_tl)
+          )
+        else:
+          transformers.append(TransformerBlock2D(config.transformer_block_config))
     self.resnets = nn.ModuleList(resnets)
     self.transformers = (
         nn.ModuleList(transformers) if len(transformers) > 0 else None
@@ -517,7 +603,13 @@ class UpDecoderBlock2D(nn.Module):
           )
       )
       if config.transformer_block_config:
-        transformers.append(TransformerBlock2D(config.transformer_block_config))
+        num_tl = getattr(config, 'num_transformer_layers', 1)
+        if num_tl > 1:
+          transformers.append(
+              MultiLayerTransformerBlock2D(config.transformer_block_config, num_tl)
+          )
+        else:
+          transformers.append(TransformerBlock2D(config.transformer_block_config))
     self.resnets = nn.ModuleList(resnets)
     self.transformers = (
         nn.ModuleList(transformers) if len(transformers) > 0 else None
@@ -642,12 +734,22 @@ class SkipUpDecoderBlock2D(nn.Module):
           )
       )
       if config.transformer_block_config:
-        transformers.append(
-            TransformerBlock2D(
-                config.transformer_block_config,
-                dim_override=sub_block_channels[i],
-            )
-        )
+        num_tl = getattr(config, 'num_transformer_layers', 1)
+        if num_tl > 1:
+          transformers.append(
+              MultiLayerTransformerBlock2D(
+                  config.transformer_block_config,
+                  num_tl,
+                  dim_override=sub_block_channels[i],
+              )
+          )
+        else:
+          transformers.append(
+              TransformerBlock2D(
+                  config.transformer_block_config,
+                  dim_override=sub_block_channels[i],
+              )
+          )
     self.resnets = nn.ModuleList(resnets)
     self.transformers = (
         nn.ModuleList(transformers) if len(transformers) > 0 else None
@@ -758,7 +860,13 @@ class MidBlock2D(nn.Module):
       if self.config.attention_block_config:
         attentions.append(AttentionBlock2D(config.attention_block_config))
       if self.config.transformer_block_config:
-        transformers.append(TransformerBlock2D(config.transformer_block_config))
+        num_tl = getattr(config, 'num_transformer_layers', 1)
+        if num_tl > 1:
+          transformers.append(
+              MultiLayerTransformerBlock2D(config.transformer_block_config, num_tl)
+          )
+        else:
+          transformers.append(TransformerBlock2D(config.transformer_block_config))
       resnets.append(
           ResidualBlock2D(
               unet_cfg.ResidualBlock2DConfig(

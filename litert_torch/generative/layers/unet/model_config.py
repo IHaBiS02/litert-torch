@@ -143,6 +143,8 @@ class SkipUpDecoderBlock2DConfig:
   context_dim: Optional[int] = None
   sub_block_channels: Optional[tuple] = None
   hidden_channels: Optional[int] = None
+  # Number of internal transformer layers per transformer block (1 for SD1.5, 2 or 10 for SDXL)
+  num_transformer_layers: int = 1
 
 
 @dataclasses.dataclass
@@ -165,6 +167,8 @@ class DownEncoderBlock2DConfig:
   # Optional dimension of context tensor if context tensor is given as input.
   context_dim: Optional[int] = None
   hidden_channels: Optional[int] = None
+  # Number of internal transformer layers per transformer block (1 for SD1.5, 2 or 10 for SDXL)
+  num_transformer_layers: int = 1
 
 
 @dataclasses.dataclass
@@ -181,6 +185,8 @@ class MidBlock2DConfig:
   transformer_block_config: Optional[TransformerBlock2DConfig] = None
   # Optional dimension of context tensor if context tensor is given as input.
   context_dim: Optional[int] = None
+  # Number of internal transformer layers per transformer block (1 for SD1.5, 2 or 10 for SDXL)
+  num_transformer_layers: int = 1
 
 
 @dataclasses.dataclass
