@@ -796,10 +796,12 @@ def _annotate_add_relu(
     add_partition, relu_partition = fused_partition
     annotated_partitions.append(add_partition.nodes + relu_partition.nodes)
     if len(relu_partition.output_nodes) > 1:
-      raise ValueError("Relu partition has more than one output node")
+      print("Relu partition has more than one output node")
+      continue
     relu_node = relu_partition.output_nodes[0]
     if len(add_partition.output_nodes) > 1:
-      raise ValueError("add partition has more than one output node")
+      print("add partition has more than one output node")
+      continue
     add_node = add_partition.output_nodes[0]
 
     if _is_annotated([relu_node, add_node]):
@@ -879,10 +881,12 @@ def _annotate_mul_relu(
     mul_partition, relu_partition = fused_partition
     annotated_partitions.append(mul_partition.nodes + relu_partition.nodes)
     if len(relu_partition.output_nodes) > 1:
-      raise ValueError("Relu partition has more than one output node")
+      print("Relu partition has more than one output node")
+      continue
     relu_node = relu_partition.output_nodes[0]
     if len(mul_partition.output_nodes) > 1:
-      raise ValueError("mul partition has more than one output node")
+      print("mul partition has more than one output node")
+      continue
     mul_node = mul_partition.output_nodes[0]
 
     if _is_annotated([relu_node, mul_node]):
