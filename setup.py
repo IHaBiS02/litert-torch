@@ -91,7 +91,7 @@ setup(
         "tabulate",
         "torch>=2.4.0",
         "ai-edge-litert-nightly[model-utils]==2.2.0.dev20260319",  # with converter
-        "ai-edge-quantizer-nightly",
+        "ai-edge-quantizer-nightly==0.5.1.dev20260319",
         "torchao",
         "jax",
         "jaxtyping",
