@@ -23,7 +23,10 @@ from litert_torch._convert import signature as signature_module
 from litert_torch.quantize import quant_config as qcfg
 import torch
 
-from ai_edge_litert.aot.core import types as litert_types
+try:
+  from ai_edge_litert.aot.core import aot_types as litert_types
+except ImportError:
+  from ai_edge_litert.aot.core import types as litert_types
 from ai_edge_litert.aot.vendors import import_vendor as vendor_lib
 
 
@@ -136,6 +139,7 @@ class Converter:
       dynamic_shapes: dict[str, Any] | tuple[Any, ...] | None = None,
       lightweight_conversion: bool = False,
       enable_x64: bool = True,
+      runtime_constant_folding: bool | None = None,
   ) -> model.LiteRTModel | litert_types.CompilationResult:
     """Finalizes the conversion and produces an edge model.
 
@@ -171,6 +175,10 @@ class Converter:
         enabling this mode may bypass certain graph optimizations, such as
         constant folding, in the resulting model.
       enable_x64: If False, downcast x64 tensors and inputs to x32.
+      runtime_constant_folding: If True, uses the LiteRT runtime to fold
+        constants beyond what the standard converter can resolve. If None
+        (default), this is enabled automatically when `lightweight_conversion`
+        is True to maintain model quality.
 
     Returns:
       The converted edge model. If compilation configs are provided, returns the
@@ -203,6 +211,7 @@ class Converter:
         quant_config=quant_config,
         lightweight_conversion=lightweight_conversion,
         enable_x64=enable_x64,
+        runtime_constant_folding=runtime_constant_folding,
     )
     if self._compilation_configs:
       return core.aot_compile(self._compilation_configs, converted_model)
@@ -272,6 +281,7 @@ def convert(
     dynamic_shapes: dict[str, Any] | tuple[Any, ...] | None = None,
     lightweight_conversion: bool = False,
     enable_x64: bool = True,
+    runtime_constant_folding: bool | None = None,
 ) -> model.LiteRTModel:
   """Converts a PyTorch model to an edge model with a default signature.
 
@@ -298,6 +308,10 @@ def convert(
       this mode may bypass certain graph optimizations, such as constant
       folding, in the resulting model.
     enable_x64: If False, downcast x64 tensors and inputs to x32.
+    runtime_constant_folding: If True, uses the LiteRT runtime to fold constants
+      beyond what the standard converter can resolve. If None (default), this is
+      enabled automatically when `lightweight_conversion` is True to maintain
+      model quality.
 
   Returns:
     The converted edge model.
@@ -315,4 +329,5 @@ def convert(
       dynamic_shapes=dynamic_shapes,
       lightweight_conversion=lightweight_conversion,
       enable_x64=enable_x64,
+      runtime_constant_folding=runtime_constant_folding,
   )
